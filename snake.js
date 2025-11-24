@@ -1,323 +1,439 @@
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
-const box = 20;
-const rows = canvas.height / box;
-const cols = canvas.width / box;
 
-let snake, direction, food, score;
+// Game Constants
+const GRID_SIZE = 20;
+const TILE_COUNT = 20; // 400px / 20px
+const GAME_SPEED = 100; // ms per move (logic update rate)
+
+// Game State
+let snake = [];
+let food = { x: 10, y: 10 };
+let velocity = { x: 0, y: 0 };
+let score = 0;
 let highscore = localStorage.getItem("highscore") || 0;
-let state = "menu"; // 'menu' | 'playing' | 'gameover'
-let mode = null; // 'player' | 'bot'
-let inputQueue = []; // Buffer for key presses
+let lastTime = 0;
+let accumulator = 0;
+let particles = [];
+let gameState = "MENU"; // MENU, PLAYING, GAMEOVER
+let gameMode = "PLAYER"; // PLAYER, BOT
 
-// --- Audio Setup ---
+// DOM Elements
+const scoreEl = document.getElementById("score");
+const highscoreEl = document.getElementById("highscore");
+const finalScoreEl = document.getElementById("final-score-val");
+const menuScreen = document.getElementById("menu-screen");
+const gameoverScreen = document.getElementById("gameover-screen");
+
+// Audio Context
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
-function playSound(type) {
-  if (!audioCtx) return;
+// --- Initialization ---
+function init() {
+  resizeCanvas();
+  window.addEventListener("resize", resizeCanvas);
 
-  const oscillator = audioCtx.createOscillator();
-  const gainNode = audioCtx.createGain();
+  // Button Listeners
+  document.getElementById("btn-play").addEventListener("click", () => startGame("PLAYER"));
+  document.getElementById("btn-bot").addEventListener("click", () => startGame("BOT"));
+  document.getElementById("btn-restart").addEventListener("click", () => startGame("PLAYER"));
+  document.getElementById("btn-menu").addEventListener("click", showMenu);
 
-  oscillator.connect(gainNode);
-  gainNode.connect(audioCtx.destination);
+  // Input Listeners
+  document.addEventListener("keydown", handleKeydown);
+  setupTouchControls();
 
-  if (type === "eat") {
-    oscillator.type = "square";
-    oscillator.frequency.setValueAtTime(600, audioCtx.currentTime);
-    oscillator.frequency.exponentialRampToValueAtTime(800, audioCtx.currentTime + 0.1);
-    gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
-    gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
-    oscillator.start();
-    oscillator.stop(audioCtx.currentTime + 0.1);
-  } else if (type === "gameover") {
-    oscillator.type = "sawtooth";
-    oscillator.frequency.setValueAtTime(200, audioCtx.currentTime);
-    oscillator.frequency.exponentialRampToValueAtTime(50, audioCtx.currentTime + 0.3);
-    gainNode.gain.setValueAtTime(0.2, audioCtx.currentTime);
-    gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.3);
-    oscillator.start();
-    oscillator.stop(audioCtx.currentTime + 0.3);
+  // Start Loop
+  requestAnimationFrame(gameLoop);
+}
+
+function resizeCanvas() {
+  // Keep internal resolution fixed, CSS handles scaling
+  canvas.width = 400;
+  canvas.height = 400;
+}
+
+function showMenu() {
+  gameState = "MENU";
+  menuScreen.classList.remove("hidden");
+  gameoverScreen.classList.add("hidden");
+  resetGame();
+}
+
+function startGame(mode) {
+  if (audioCtx.state === "suspended") audioCtx.resume();
+
+  gameMode = mode;
+  gameState = "PLAYING";
+  menuScreen.classList.add("hidden");
+  gameoverScreen.classList.add("hidden");
+  resetGame();
+
+  if (mode === "PLAYER") {
+    velocity = { x: 1, y: 0 }; // Start moving right
   }
 }
 
-document.getElementById("highscore").textContent = highscore;
-document.addEventListener("keydown", handleKeyPress);
-
-// --- Bot Control (BFS Pathfinding + Survival) ---
-function botControl() {
-  const head = snake[0];
-
-  // 1. Try to find shortest path to food
-  const path = bfs(head, food);
-
-  if (path.length > 0) {
-    // Path found, take the first step
-    const nextMove = path[0];
-    direction = getDirection(head, nextMove);
-  } else {
-    // 2. No path to food (blocked), try to survive longer
-    // Pick the move that leads to the most open space (Flood Fill)
-    const safeMoves = getSafeMoves(head);
-
-    if (safeMoves.length > 0) {
-      let bestMove = safeMoves[0];
-      let maxSpace = -1;
-
-      for (const move of safeMoves) {
-        const space = floodFill(move);
-        if (space > maxSpace) {
-          maxSpace = space;
-          bestMove = move;
-        }
-      }
-      direction = getDirection(head, bestMove);
-    }
-  }
-}
-
-// BFS to find shortest path from start to target
-function bfs(start, target) {
-  const queue = [[start]];
-  const visited = new Set();
-  visited.add(`${start.x},${start.y}`);
-
-  // Create a set of snake body positions for fast lookup
-  const snakeBody = new Set(snake.map(s => `${s.x},${s.y}`));
-
-  while (queue.length > 0) {
-    const path = queue.shift();
-    const current = path[path.length - 1];
-
-    if (current.x === target.x && current.y === target.y) {
-      return path.slice(1); // Return path excluding start
-    }
-
-    const neighbors = getNeighbors(current);
-
-    for (const neighbor of neighbors) {
-      const key = `${neighbor.x},${neighbor.y}`;
-      // Allow moving to tail because it will move away
-      const isTail = neighbor.x === snake[snake.length - 1].x && neighbor.y === snake[snake.length - 1].y;
-
-      if (!visited.has(key) && (!snakeBody.has(key) || isTail)) {
-        visited.add(key);
-        queue.push([...path, neighbor]);
-      }
-    }
-  }
-  return []; // No path found
-}
-
-// Count reachable cells from a starting point
-function floodFill(start) {
-  const queue = [start];
-  const visited = new Set();
-  visited.add(`${start.x},${start.y}`);
-  const snakeBody = new Set(snake.map(s => `${s.x},${s.y}`));
-  let count = 0;
-
-  while (queue.length > 0) {
-    const current = queue.shift();
-    count++;
-
-    const neighbors = getNeighbors(current);
-    for (const neighbor of neighbors) {
-      const key = `${neighbor.x},${neighbor.y}`;
-      if (!visited.has(key) && !snakeBody.has(key)) {
-        visited.add(key);
-        queue.push(neighbor);
-      }
-    }
-  }
-  return count;
-}
-
-function getNeighbors(pos) {
-  const moves = [
-    { x: pos.x - box, y: pos.y }, // Left
-    { x: pos.x + box, y: pos.y }, // Right
-    { x: pos.x, y: pos.y - box }, // Up
-    { x: pos.x, y: pos.y + box }  // Down
-  ];
-
-  return moves.filter(m =>
-    m.x >= 0 && m.x < canvas.width &&
-    m.y >= 0 && m.y < canvas.height
-  );
-}
-
-function getSafeMoves(head) {
-  return getNeighbors(head).filter(pos => {
-    // Check collision with snake body
-    return !snake.some(s => s.x === pos.x && s.y === pos.y);
-  });
-}
-
-function getDirection(from, to) {
-  if (to.x < from.x) return "LEFT";
-  if (to.x > from.x) return "RIGHT";
-  if (to.y < from.y) return "UP";
-  if (to.y > from.y) return "DOWN";
-  return direction;
-}
-
-// --- Reset Game ---
 function resetGame() {
-  snake = [{ x: 9 * box, y: 9 * box }];
-  direction = "RIGHT";
-  inputQueue = []; // Clear buffer
-  food = spawnFood();
+  snake = [
+    { x: 10, y: 10 },
+    { x: 9, y: 10 },
+    { x: 8, y: 10 }
+  ];
+  velocity = { x: 1, y: 0 };
   score = 0;
-  document.getElementById("score").textContent = score;
-}
-
-// --- Food ---
-function spawnFood() {
-  return {
-    x: Math.floor(Math.random() * cols) * box,
-    y: Math.floor(Math.random() * rows) * box,
-  };
-}
-
-// --- Key Handling ---
-function handleKeyPress(e) {
-  if (state === "menu") {
-    if (e.key === "1") {
-      if (audioCtx.state === "suspended") audioCtx.resume();
-      mode = "player";
-      state = "playing";
-      resetGame();
-    } else if (e.key === "2") {
-      if (audioCtx.state === "suspended") audioCtx.resume();
-      mode = "bot";
-      state = "playing";
-      resetGame();
-    }
-  } else if (state === "playing" && mode === "player") {
-    const key = e.key.toLowerCase();
-    let nextDir = null;
-
-    if (key === "arrowleft" || key === "a") nextDir = "LEFT";
-    else if (key === "arrowup" || key === "w") nextDir = "UP";
-    else if (key === "arrowright" || key === "d") nextDir = "RIGHT";
-    else if (key === "arrowdown" || key === "s") nextDir = "DOWN";
-
-    if (nextDir) {
-      const lastPlannedDir = inputQueue.length > 0 ? inputQueue[inputQueue.length - 1] : direction;
-
-      if (nextDir === "LEFT" && lastPlannedDir !== "RIGHT") inputQueue.push(nextDir);
-      else if (nextDir === "UP" && lastPlannedDir !== "DOWN") inputQueue.push(nextDir);
-      else if (nextDir === "RIGHT" && lastPlannedDir !== "LEFT") inputQueue.push(nextDir);
-      else if (nextDir === "DOWN" && lastPlannedDir !== "UP") inputQueue.push(nextDir);
-    }
-  } else if (state === "gameover") {
-    if (e.key === " ") {
-      state = "playing";
-      resetGame();
-    } else if (e.key.toLowerCase() === "q") {
-      state = "menu";
-    }
-  }
-}
-
-// --- Menu ---
-function drawMenu() {
-  ctx.fillStyle = "#000";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = "#fff";
-  ctx.font = "20px 'Space Mono', monospace";
-  ctx.textAlign = "center";
-  ctx.fillText("SELECT MODE", canvas.width / 2, canvas.height / 2 - 40);
-  ctx.fillText("1 = PLAYER (WASD)", canvas.width / 2, canvas.height / 2);
-  ctx.fillText("2 = BOT", canvas.width / 2, canvas.height / 2 + 30);
-}
-
-// --- Game Over ---
-function drawGameOver() {
-  ctx.fillStyle = "rgba(0, 0, 0, 0.85)";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = "#fff";
-  ctx.font = "20px 'Space Mono', monospace";
-  ctx.textAlign = "center";
-  ctx.fillText("GAME OVER", canvas.width / 2, canvas.height / 2 - 30);
-  ctx.fillText("SPACE = RESTART", canvas.width / 2, canvas.height / 2);
-  ctx.fillText("Q = MENU", canvas.width / 2, canvas.height / 2 + 30);
-}
-
-// --- Game ---
-function drawGame() {
-  if (mode === "bot") {
-    botControl();
-  } else {
-    // Process one move from the queue per frame
-    if (inputQueue.length > 0) {
-      direction = inputQueue.shift();
-    }
-  }
-
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  // Snake
-  snake.forEach((segment, index) => {
-    // Head is solid white, body is white with a black border (or just smaller)
-    ctx.fillStyle = "#fff";
-    ctx.fillRect(segment.x, segment.y, box, box);
-
-    // Optional: Add a small border to distinguish segments
-    ctx.strokeStyle = "#000";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(segment.x, segment.y, box, box);
-  });
-
-  // Food
-  ctx.fillStyle = "#fff";
-  // Draw food as a smaller square or circle to distinguish from snake
-  ctx.fillRect(food.x + 4, food.y + 4, box - 8, box - 8);
-
-  // Movement
-  let head = { ...snake[0] };
-  if (direction === "LEFT") head.x -= box;
-  if (direction === "RIGHT") head.x += box;
-  if (direction === "UP") head.y -= box;
-  if (direction === "DOWN") head.y += box;
-
-  // Game over check
-  if (
-    head.x < 0 ||
-    head.x >= canvas.width ||
-    head.y < 0 ||
-    head.y >= canvas.height ||
-    snake.some((seg) => seg.x === head.x && seg.y === head.y)
-  ) {
-    if (score > highscore) {
-      localStorage.setItem("highscore", score);
-      highscore = score;
-      document.getElementById("highscore").textContent = highscore;
-    }
-    playSound("gameover");
-    state = "gameover";
-    return;
-  }
-
-  // Eating
-  if (head.x === food.x && head.y === food.y) {
-    score++;
-    document.getElementById("score").textContent = score;
-    playSound("eat");
-    food = spawnFood();
-  } else {
-    snake.pop();
-  }
-
-  snake.unshift(head);
+  updateScore(0);
+  spawnFood();
+  particles = [];
 }
 
 // --- Game Loop ---
-function gameLoop() {
-  if (state === "menu") drawMenu();
-  else if (state === "playing") drawGame();
-  else if (state === "gameover") drawGameOver();
+function gameLoop(currentTime) {
+  const deltaTime = currentTime - lastTime;
+  lastTime = currentTime;
+
+  if (gameState === "PLAYING") {
+    accumulator += deltaTime;
+    while (accumulator > GAME_SPEED) {
+      update();
+      accumulator -= GAME_SPEED;
+    }
+  }
+
+  render(deltaTime); // Pass delta for smooth animations if needed
+  requestAnimationFrame(gameLoop);
 }
 
-setInterval(gameLoop, 80);
+// --- Update Logic ---
+function update() {
+  if (gameMode === "BOT") {
+    botLogic();
+  }
+
+  const head = { x: snake[0].x + velocity.x, y: snake[0].y + velocity.y };
+
+  // Wall Collision
+  if (head.x < 0 || head.x >= TILE_COUNT || head.y < 0 || head.y >= TILE_COUNT) {
+    gameOver();
+    return;
+  }
+
+  // Self Collision
+  for (let i = 0; i < snake.length; i++) {
+    if (head.x === snake[i].x && head.y === snake[i].y) {
+      gameOver();
+      return;
+    }
+  }
+
+  snake.unshift(head);
+
+  // Food Collision
+  if (head.x === food.x && head.y === food.y) {
+    score++;
+    updateScore(score);
+    playSound("eat");
+    createParticles(head.x * GRID_SIZE + GRID_SIZE / 2, head.y * GRID_SIZE + GRID_SIZE / 2, "#00ff88");
+    spawnFood();
+  } else {
+    snake.pop();
+  }
+}
+
+function gameOver() {
+  gameState = "GAMEOVER";
+  playSound("gameover");
+  finalScoreEl.textContent = score;
+  gameoverScreen.classList.remove("hidden");
+
+  if (score > highscore) {
+    highscore = score;
+    localStorage.setItem("highscore", highscore);
+    highscoreEl.textContent = highscore;
+  }
+}
+
+function spawnFood() {
+  let valid = false;
+  while (!valid) {
+    food.x = Math.floor(Math.random() * TILE_COUNT);
+    food.y = Math.floor(Math.random() * TILE_COUNT);
+
+    valid = true;
+    for (let part of snake) {
+      if (part.x === food.x && part.y === food.y) {
+        valid = false;
+        break;
+      }
+    }
+  }
+}
+
+function updateScore(val) {
+  scoreEl.textContent = val;
+}
+
+// --- Rendering ---
+function render() {
+  // Clear
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // Draw Grid
+  drawGrid();
+
+  // Draw Food
+  drawFood();
+
+  // Draw Snake
+  drawSnake();
+
+  // Draw Particles
+  updateAndDrawParticles();
+}
+
+function drawGrid() {
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.03)";
+  ctx.lineWidth = 1;
+
+  for (let x = 0; x <= canvas.width; x += GRID_SIZE) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, canvas.height);
+    ctx.stroke();
+  }
+
+  for (let y = 0; y <= canvas.height; y += GRID_SIZE) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(canvas.width, y);
+    ctx.stroke();
+  }
+}
+
+function drawSnake() {
+  snake.forEach((part, index) => {
+    const x = part.x * GRID_SIZE;
+    const y = part.y * GRID_SIZE;
+
+    ctx.fillStyle = index === 0 ? "#ffffff" : "#00ff88";
+
+    // Glow effect
+    ctx.shadowBlur = 15;
+    ctx.shadowColor = "#00ff88";
+
+    // Rounded rect for body
+    roundRect(ctx, x + 1, y + 1, GRID_SIZE - 2, GRID_SIZE - 2, 4);
+    ctx.fill();
+
+    ctx.shadowBlur = 0; // Reset
+  });
+}
+
+function drawFood() {
+  const x = food.x * GRID_SIZE + GRID_SIZE / 2;
+  const y = food.y * GRID_SIZE + GRID_SIZE / 2;
+
+  ctx.fillStyle = "#ff0055";
+  ctx.shadowBlur = 20;
+  ctx.shadowColor = "#ff0055";
+
+  ctx.beginPath();
+  ctx.arc(x, y, GRID_SIZE / 3, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.shadowBlur = 0;
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  if (w < 2 * r) r = w / 2;
+  if (h < 2 * r) r = h / 2;
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+// --- Particles ---
+function createParticles(x, y, color) {
+  for (let i = 0; i < 10; i++) {
+    particles.push({
+      x: x,
+      y: y,
+      vx: (Math.random() - 0.5) * 4,
+      vy: (Math.random() - 0.5) * 4,
+      life: 1.0,
+      color: color
+    });
+  }
+}
+
+function updateAndDrawParticles() {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    let p = particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.life -= 0.05;
+
+    if (p.life <= 0) {
+      particles.splice(i, 1);
+      continue;
+    }
+
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1.0;
+  }
+}
+
+// --- Input Handling ---
+function handleKeydown(e) {
+  if (gameState !== "PLAYING" || gameMode === "BOT") return;
+
+  switch (e.key) {
+    case "ArrowUp": case "w": case "W":
+      if (velocity.y === 0) velocity = { x: 0, y: -1 };
+      break;
+    case "ArrowDown": case "s": case "S":
+      if (velocity.y === 0) velocity = { x: 0, y: 1 };
+      break;
+    case "ArrowLeft": case "a": case "A":
+      if (velocity.x === 0) velocity = { x: -1, y: 0 };
+      break;
+    case "ArrowRight": case "d": case "D":
+      if (velocity.x === 0) velocity = { x: 1, y: 0 };
+      break;
+  }
+}
+
+// Touch / Swipe Controls
+function setupTouchControls() {
+  let touchStartX = 0;
+  let touchStartY = 0;
+  const gameContainer = document.getElementById("game-container");
+
+  gameContainer.addEventListener("touchstart", (e) => {
+    touchStartX = e.changedTouches[0].screenX;
+    touchStartY = e.changedTouches[0].screenY;
+  }, { passive: false });
+
+  gameContainer.addEventListener("touchmove", (e) => {
+    e.preventDefault(); // Prevent scrolling
+  }, { passive: false });
+
+  gameContainer.addEventListener("touchend", (e) => {
+    if (gameState !== "PLAYING" || gameMode === "BOT") return;
+
+    const touchEndX = e.changedTouches[0].screenX;
+    const touchEndY = e.changedTouches[0].screenY;
+
+    const dx = touchEndX - touchStartX;
+    const dy = touchEndY - touchStartY;
+
+    if (Math.abs(dx) > Math.abs(dy)) {
+      // Horizontal
+      if (Math.abs(dx) > 30) { // Threshold
+        if (dx > 0 && velocity.x === 0) velocity = { x: 1, y: 0 };
+        else if (dx < 0 && velocity.x === 0) velocity = { x: -1, y: 0 };
+      }
+    } else {
+      // Vertical
+      if (Math.abs(dy) > 30) {
+        if (dy > 0 && velocity.y === 0) velocity = { x: 0, y: 1 };
+        else if (dy < 0 && velocity.y === 0) velocity = { x: 0, y: -1 };
+      }
+    }
+  });
+}
+
+// --- Audio ---
+function playSound(type) {
+  if (!audioCtx) return;
+
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+
+  const now = audioCtx.currentTime;
+
+  if (type === "eat") {
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(600, now);
+    osc.frequency.exponentialRampToValueAtTime(1200, now + 0.1);
+    gain.gain.setValueAtTime(0.1, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+    osc.start(now);
+    osc.stop(now + 0.1);
+  } else if (type === "gameover") {
+    osc.type = "sawtooth";
+    osc.frequency.setValueAtTime(200, now);
+    osc.frequency.exponentialRampToValueAtTime(50, now + 0.5);
+    gain.gain.setValueAtTime(0.2, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
+    osc.start(now);
+    osc.stop(now + 0.5);
+  }
+}
+
+// --- Bot Logic (Simple BFS/Greedy) ---
+function botLogic() {
+  // Simple greedy approach for demo purposes
+  // A full BFS/Hamiltonian cycle is better but more complex
+  const head = snake[0];
+
+  // Try to move towards food
+  let moves = [
+    { x: 0, y: -1 }, // UP
+    { x: 0, y: 1 },  // DOWN
+    { x: -1, y: 0 }, // LEFT
+    { x: 1, y: 0 }   // RIGHT
+  ];
+
+  // Filter out invalid moves (walls, self)
+  moves = moves.filter(m => {
+    const nx = head.x + m.x;
+    const ny = head.y + m.y;
+
+    // Wall check
+    if (nx < 0 || nx >= TILE_COUNT || ny < 0 || ny >= TILE_COUNT) return false;
+
+    // Body check
+    for (let part of snake) {
+      if (part.x === nx && part.y === ny) return false;
+    }
+
+    // Don't reverse
+    if (m.x === -velocity.x && m.y === -velocity.y) return false;
+
+    return true;
+  });
+
+  if (moves.length === 0) return; // No moves, will die
+
+  // Pick move that gets closer to food
+  let bestMove = moves[0];
+  let minDist = 9999;
+
+  for (let m of moves) {
+    const nx = head.x + m.x;
+    const ny = head.y + m.y;
+    const dist = Math.abs(nx - food.x) + Math.abs(ny - food.y);
+
+    if (dist < minDist) {
+      minDist = dist;
+      bestMove = m;
+    }
+  }
+
+  velocity = bestMove;
+}
+
+// Start
+init();
+highscoreEl.textContent = highscore;

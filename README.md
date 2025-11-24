@@ -4,7 +4,7 @@ Klassinen Snake-peli modernilla JavaScript-toteutuksella, joka sisältää sekä
 
 ## Kuvakaappaus
 
-## ![Pelikuva](screenshot.png)
+## ![Pelikuva](screenshot.png?v=1)
 
 ## Ominaisuudet
 
